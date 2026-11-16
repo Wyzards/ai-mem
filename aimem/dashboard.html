@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ai-mem live</title>
+<style>
+:root{--bg:#f6f5f1;--panel:#fff;--ink:#1d1d1b;--muted:#77756e;--line:#dedcd5;--accent:#2f6fb0;--perc:#3b7dd8;--sit:#d9952b;--state:#2f9e6a;--held:#9aa79f;--raw:#7c6fd6;--bad:#c8473d;--chip:#eef1f5}
+@media (prefers-color-scheme:dark){:root{--bg:#121211;--panel:#1c1c1a;--ink:#ecebe6;--muted:#9a9890;--line:#34332f;--accent:#7fb2ea;--perc:#6aa4f0;--sit:#f0b45a;--state:#4fc48b;--held:#6d7a72;--raw:#a79bf0;--bad:#f2867d;--chip:#262a30}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 system-ui,Segoe UI,sans-serif}
+header{display:flex;align-items:center;gap:14px;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+header b{font-size:15px}.pill{padding:2px 10px;border-radius:12px;font-size:12px;background:var(--chip)}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle}
+main{max-width:1280px;margin:0 auto;padding:14px 16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:14px}
+svg text{fill:var(--ink);font-family:system-ui,Segoe UI,sans-serif}
+.box rect{fill:var(--panel);stroke:var(--line);stroke-width:1.5;cursor:pointer;transition:stroke .2s}
+.box:hover rect,.box.on rect{stroke:var(--accent);stroke-width:2.5}
+.job{fill:var(--muted);font-size:11px}.big{font-size:22px;font-weight:700}.sub{fill:var(--muted);font-size:11px}
+.edge{stroke:var(--line);stroke-width:2;fill:none}
+.ticker div{padding:4px 0;border-bottom:1px solid var(--line);font-size:13px;animation:in .5s}
+@keyframes in{from{opacity:0;transform:translateY(-6px)}to{opacity:1}}
+@keyframes pulse{0%{opacity:1}50%{opacity:.25}100%{opacity:1}}.pulse{animation:pulse 1.4s infinite}
+.muted{color:var(--muted)}.grid2{display:grid;grid-template-columns:2fr 1fr;gap:14px}@media(max-width:900px){.grid2{grid-template-columns:1fr}}
+h3{margin:2px 0 10px;font-size:14px}a{color:var(--accent)}
+canvas{width:100%;display:block;border-radius:8px}
+.legend span{margin-right:12px;font-size:12px}
+.side{font-size:13px;max-height:520px;overflow:auto}
+pre{white-space:pre-wrap;word-break:break-word;font:12px/1.4 ui-monospace,Consolas,monospace;background:var(--chip);padding:10px;border-radius:6px;max-height:360px;overflow:auto}
+.chip{display:inline-block;background:var(--chip);border-radius:10px;padding:1px 8px;font-size:12px;margin:1px 3px 1px 0}
+table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid var(--line);padding:5px 6px;text-align:left;vertical-align:top;font-size:13px}
+.bar{height:16px;border-radius:4px;display:inline-block}
+</style>
+</head>
+<body>
+<header><b>ai-mem</b><span id="worker" class="pill"></span><span id="mode" class="pill"></span><span id="spend" class="pill"></span><a href="#" style="margin-left:auto">system map</a></header>
+<main id="main"></main>
+<script>
+const $=s=>document.querySelector(s), esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const get=p=>fetch(p).then(r=>r.json()); const css=v=>getComputedStyle(document.body).getPropertyValue(v).trim();
+const ago=s=>{if(!s)return"";const d=(Date.now()-new Date(s))/1000;return d<60?Math.round(d)+"s ago":d<3600?Math.round(d/60)+"m ago":d<86400?Math.round(d/3600)+"h ago":new Date(s).toLocaleDateString()};
+const fmt=n=>n>=1e6?(n/1e6).toFixed(1)+"M":n>=1e4?Math.round(n/1e3)+"k":n>=1e3?(n/1e3).toFixed(1)+"k":String(n??0);
+let SYS=null, focus=null, timer=null;
+
+/* ---------- the system map ---------- */
+const PIECES=[
+ {id:"sessions",x:20,y:150,name:"Claude Code",job:"where you work",num:s=>s.sessions,unit:"sessions"},
+ {id:"store",x:220,y:40,name:"Store",job:"keeps every input as is",num:s=>s.raw_inputs,unit:s=>s.raw_mb+" MB raw"},
+ {id:"queue",x:420,y:40,name:"Queue",job:"waits to be understood",num:s=>Object.values(s.queue).reduce((a,b)=>a+b,0),unit:s=>s.queue.live_said+s.queue.live_tool+" live"},
+ {id:"perceive",x:620,y:40,name:"Perceive",job:"model writes memories",num:s=>s.perceived,unit:"inputs understood",model:1},
+ {id:"graph",x:820,y:150,name:"Memory",job:"memories and their links",num:s=>s.perceptions+s.situations+s.states_holds+s.states_held,unit:s=>fmt(s.links)+" links"},
+ {id:"state",x:620,y:260,name:"State",job:"model keeps what's true now",num:s=>s.states_holds,unit:s=>s.states_held+" held back",model:1},
+ {id:"recall",x:420,y:260,name:"Recall",job:"finds what matters now",num:s=>s.recalls,unit:s=>Math.round(s.recall_ms||0)+" ms avg"},
+ {id:"inject",x:220,y:260,name:"Inject",job:"hands it to the model",num:s=>s.recent_recalls.length?s.recent_recalls[0].n:0,unit:"in last recall"},
+];
+const EDGES=[["sessions","store","stored"],["store","queue","stored"],["queue","perceive","perceive"],["perceive","graph","perceive"],["perceive","state","state"],["state","graph","state"],["graph","recall","recall"],["recall","inject","recall"],["inject","sessions","recall"]];
+const W=170,H=78,P=Object.fromEntries(PIECES.map(p=>[p.id,p]));
+function center(p){return[p.x+W/2,p.y+H/2]}
+function edgePath(a,b){const[ax,ay]=center(P[a]),[bx,by]=center(P[b]);const mx=(ax+bx)/2,my=(ay+by)/2;return`M${ax},${ay} Q${mx+(ay-by)*.08},${my+(bx-ax)*.08} ${bx},${by}`}
+function mapSVG(s){
+ const act=s.activity||{};
+ const rate={stored:act.stored||0,perceive:act.perceive||0,state:act.state||0,recall:(act.recall||0)};
+ let out=`<svg viewBox="0 0 1010 360" width="100%">`;
+ EDGES.forEach(([a,b,k],i)=>{const d=edgePath(a,b),r=rate[k];out+=`<path id="e${i}" class="edge" d="${d}"/>`;
+  const n=Math.min(6,r?1+Math.ceil(Math.log2(1+r)):0);for(let j=0;j<n;j++)out+=`<circle r="4" fill="${k==="recall"?css("--state"):k==="state"?css("--state"):k==="perceive"?css("--perc"):css("--raw")}"><animateMotion dur="${Math.max(1.2,4-Math.log2(1+r)*.4)}s" begin="${j*0.6}s" repeatCount="indefinite"><mpath href="#e${i}"/></animateMotion></circle>`;});
+ PIECES.forEach(p=>{const n=p.num(s),u=typeof p.unit==="function"?p.unit(s):p.unit;
+  out+=`<g class="box ${focus===p.id?"on":""}" onclick="openPiece('${p.id}')"><rect x="${p.x}" y="${p.y}" width="${W}" height="${H}" rx="12"/>
+  <text x="${p.x+12}" y="${p.y+20}" font-weight="700">${p.name}${p.model?' <tspan class="sub">· model</tspan>':""}</text>
+  <text x="${p.x+12}" y="${p.y+34}" class="job">${p.job}</text>
+  <text x="${p.x+12}" y="${p.y+62}" class="big">${fmt(n)}</text><text x="${p.x+W-10}" y="${p.y+62}" class="sub" text-anchor="end">${esc(u)}</text></g>`;});
+ // budget ring between perceive and state
+ const used=Math.max(s.spend.spend_5h/s.spend.budget_5h,s.spend.spend_24h/s.spend.budget_24h),pct=Math.min(1,used/2),R=26,C=2*Math.PI*R;
+ const col=s.mode==="full"?css("--state"):css("--sit");
+ out+=`<g transform="translate(870,62)"><circle r="${R}" fill="none" stroke="${css("--line")}" stroke-width="7"/><circle r="${R}" fill="none" stroke="${col}" stroke-width="7" stroke-dasharray="${C*pct} ${C}" transform="rotate(-90)"/>
+ <text text-anchor="middle" y="5" font-weight="700" font-size="13">${Math.round(used*100)}%</text><text text-anchor="middle" y="44" class="sub">history pace</text></g>`;
+ return out+`</svg>`;
+}
+function header(s){
+ $("#worker").innerHTML=`<span class="dot ${s.worker?"pulse":""}" style="background:${s.worker?css("--state"):css("--held")}"></span>worker ${s.worker?"working":"idle"}`;
+ $("#mode").textContent={full:"live + history backfill",live:"live only, history paused for today"}[s.mode];
+ $("#spend").textContent=`history pace ${Math.round(100*s.spend.spend_24h/s.spend.budget_24h)}% used today`;
+}
+
+/* ---------- drill-downs ---------- */
+const drill={
+ async sessions(){const d=await get("/api/overview");const max=Math.max(...d.sessions.map(x=>x.inputs),1),mm=Math.max(...d.sessions.map(x=>x.memory_usd),0.01);
+  return `<h3>Sessions: how much each produced, and what memory spent on it</h3><table>${d.sessions.slice(0,25).map(x=>`<tr><td style="width:34%"><a href="#session/${x.session_id}">${esc(x.title||x.session_id.slice(0,8))}</a><div class="muted" style="font-size:11px">${esc(x.cwd)} · ${ago(x.last_at)}</div></td>
+  <td><span class="bar" style="width:${100*x.inputs/max}%;background:var(--raw)"></span> <span class="muted">${fmt(x.inputs)} inputs</span></td><td style="width:22%"><span class="bar" style="width:${100*x.memory_usd/mm}%;background:var(--state)"></span> <span class="muted">$${x.memory_usd}</span></td></tr>`).join("")}</table>`},
+ async store(){const d=await get("/api/timeline");const max=Math.max(...d.map(x=>x.said+x.tool+x.other),1),bw=Math.max(4,Math.floor(940/d.length)-2);
+  let svg=`<svg viewBox="0 0 980 220" width="100%">`;d.forEach((x,i)=>{let y=200;[["other","--held"],["tool","--raw"],["said","--perc"]].forEach(([k,c])=>{const h=170*x[k]/max;y-=h;svg+=`<rect x="${20+i*(bw+2)}" y="${y}" width="${bw}" height="${h}" fill="var(${c})"><title>${x.day}: ${x[k]} ${k}</title></rect>`});
+  if(i%7===0)svg+=`<text x="${20+i*(bw+2)}" y="216" class="sub">${x.day.slice(5)}</text>`});
+  return `<h3>Everything stored, per day</h3><div class="legend"><span><span class="dot" style="background:var(--perc)"></span>said (you, Claude)</span><span><span class="dot" style="background:var(--raw)"></span>tool calls and results</span><span><span class="dot" style="background:var(--held)"></span>app and other</span></div>${svg}</svg>`},
+ async queue(){const s=SYS,q=s.queue,tot=Math.max(1,q.live_said+q.live_tool+q.history_said+q.history_tool);
+  const seg=(n,c,l)=>n?`<div title="${l}: ${n}" style="flex:${n};background:var(${c});height:34px;display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;min-width:2px">${n/tot>.06?fmt(n):""}</div>`:"";
+  const all=s.perceived+s.history+s.skipped+tot;
+  return `<h3>What waits, in the order it will be done</h3><div style="display:flex;border-radius:6px;overflow:hidden">${seg(q.live_said,"--perc","1. live, said")}${seg(q.history_said,"--sit","2. history, said")}${seg(q.live_tool,"--raw","3. live, tool output")}${seg(q.history_tool,"--held","4. history, tool output")}</div>
+  <div class="legend" style="margin-top:6px"><span>1 <span class="dot" style="background:var(--perc)"></span>live, said ${q.live_said}</span><span>2 <span class="dot" style="background:var(--sit)"></span>your history ${q.history_said}</span><span>3 <span class="dot" style="background:var(--raw)"></span>live tool output ${q.live_tool}</span><span>${s.state_queue} memories wait for the state step</span></div>
+  <h3 style="margin-top:16px">Every stored input, by what happened to it</h3><div style="display:flex;border-radius:6px;overflow:hidden">${seg(s.perceived,"--state","understood")}${seg(tot,"--perc","queued")}${seg(s.history,"--sit","history, not queued")}${seg(s.skipped,"--held","not perceived (plumbing, duplicates)")}</div>
+  <div class="legend" style="margin-top:6px"><span><span class="dot" style="background:var(--state)"></span>understood ${fmt(s.perceived)}</span><span><span class="dot" style="background:var(--perc)"></span>queued ${fmt(tot)}</span><span><span class="dot" style="background:var(--sit)"></span>history kept raw ${fmt(s.history)}</span><span><span class="dot" style="background:var(--held)"></span>plumbing and duplicates ${fmt(s.skipped)}</span></div>`},
+ async perceive(){return hours("Perceiving and state, last 24 hours")}, async state(){return hours("Perceiving and state, last 24 hours")+(await statesList())},
+ async graph(){return graphView()}, async recall(){return recallView()}, async inject(){return recallView()},
+};
+function hours(title){const h=SYS.hours;const max=Math.max(1,...h.map(x=>x.perceive+x.state)),mu=Math.max(0.01,...h.map(x=>x.usd)),bw=Math.floor(900/Math.max(h.length,1))-4;
+ let svg=`<svg viewBox="0 0 960 220" width="100%">`,pts=[];h.forEach((x,i)=>{const X=30+i*(bw+4);const a=150*x.perceive/max,b=150*x.state/max;
+ svg+=`<rect x="${X}" y="${180-a}" width="${bw}" height="${a}" fill="var(--perc)"><title>${x.perceive} perceive</title></rect><rect x="${X}" y="${180-a-b}" width="${bw}" height="${b}" fill="var(--state)"><title>${x.state} state</title></rect><text x="${X}" y="200" class="sub">${new Date(x.h+":00:00Z").getHours()}h</text>`;
+ pts.push(`${X+bw/2},${180-150*x.usd/mu}`)});
+ svg+=`<polyline points="${pts.join(" ")}" fill="none" stroke="var(--bad)" stroke-width="2"/></svg>`;
+ return `<h3>${title}</h3><div class="legend"><span><span class="dot" style="background:var(--perc)"></span>perceive batches</span><span><span class="dot" style="background:var(--state)"></span>state steps</span><span><span class="dot" style="background:var(--bad)"></span>spend per hour (peak $${mu.toFixed(2)})</span></div>${svg}`}
+async function statesList(){const d=await get("/api/states");return `<h3>What holds now</h3>${d.filter(x=>x.status!=="ended").map(x=>`<div style="margin:6px 0"><span class="dot" style="background:var(${x.status==="holds"?"--state":"--held"})"></span><a href="#memory/${x.id}">${esc(x.subject)}</a> <span class="muted" style="font-size:12px">${x.versions} versions · ${x.status}</span></div>`).join("")}`}
+
+/* ---------- memory graph (force layout on canvas) ---------- */
+async function graphView(around){
+ setTimeout(()=>drawGraph(around),0);
+ return `<div class="grid2"><div><h3>${around?"Around memory "+around:"Newest memories and every state"} <span class="muted" style="font-size:12px">click a dot to read it, double-click to center on it</span></h3>
+ <div class="legend"><span><span class="dot" style="background:var(--perc)"></span>perception</span><span><span class="dot" style="background:var(--sit)"></span>moment</span><span><span class="dot" style="background:var(--state)"></span>state</span><span><span class="dot" style="background:var(--held)"></span>held state</span></div><canvas id="cv" height="560"></canvas></div><div class="side" id="nodeinfo"><p class="muted">Pick a dot.</p></div></div>`}
+async function drawGraph(around){
+ const d=await get("/api/graph"+(around?"?around="+around:"")),cv=$("#cv");if(!cv)return;const ctx=cv.getContext("2d"),dpr=devicePixelRatio||1;
+ const Wd=cv.clientWidth,Hd=560;cv.width=Wd*dpr;cv.height=Hd*dpr;ctx.scale(dpr,dpr);
+ const N=d.nodes.map(n=>({...n,x:Wd/2+(Math.random()-.5)*Wd*.7,y:Hd/2+(Math.random()-.5)*Hd*.7,vx:0,vy:0})),ix=Object.fromEntries(N.map((n,i)=>[n.id,i]));
+ const L=d.links.filter(l=>l.s in ix&&l.t in ix).map(l=>({a:N[ix[l.s]],b:N[ix[l.t]],k:l.kind}));
+ const deg={};L.forEach(l=>{deg[l.a.id]=(deg[l.a.id]||0)+1;deg[l.b.id]=(deg[l.b.id]||0)+1});
+ const col=n=>n.kind==="state"?(n.status==="holds"?css("--state"):css("--held")):n.kind==="situation"?css("--sit"):css("--perc");
+ const rad=n=>n.kind==="state"?7:3+Math.min(4,Math.sqrt(deg[n.id]||0));let sel=around?N[ix[around]]:null,frames=0;
+ function step(){for(let i=0;i<N.length;i++){const a=N[i];for(let j=i+1;j<N.length;j++){const b=N[j];let dx=a.x-b.x,dy=a.y-b.y,d2=dx*dx+dy*dy+.01;if(d2>22500)continue;const f=14/d2;a.vx+=dx*f;a.vy+=dy*f;b.vx-=dx*f;b.vy-=dy*f}}
+  L.forEach(l=>{const dx=l.b.x-l.a.x,dy=l.b.y-l.a.y,dd=Math.sqrt(dx*dx+dy*dy)||1,want=l.k==="state"?60:28,f=(dd-want)*.012;l.a.vx+=dx/dd*f;l.a.vy+=dy/dd*f;l.b.vx-=dx/dd*f;l.b.vy-=dy/dd*f});
+  N.forEach(n=>{n.vx+=(Wd/2-n.x)*.004;n.vy+=(Hd/2-n.y)*.004;n.vx*=.82;n.vy*=.82;n.x=Math.max(8,Math.min(Wd-8,n.x+n.vx));n.y=Math.max(8,Math.min(Hd-8,n.y+n.vy))})}
+ function draw(){ctx.clearRect(0,0,Wd,Hd);L.forEach(l=>{ctx.strokeStyle=l.k==="state"?css("--state")+"55":l.k==="relies"?css("--sit")+"66":css("--line");ctx.lineWidth=sel&&(l.a===sel||l.b===sel)?2:1;ctx.beginPath();ctx.moveTo(l.a.x,l.a.y);ctx.lineTo(l.b.x,l.b.y);ctx.stroke()});
+  N.forEach(n=>{ctx.fillStyle=col(n);ctx.beginPath();ctx.arc(n.x,n.y,rad(n),0,7);ctx.fill();if(n===sel){ctx.strokeStyle=css("--ink");ctx.lineWidth=2;ctx.stroke()}
+  if(n.kind==="state"&&n.subject){ctx.fillStyle=css("--muted");ctx.font="11px system-ui";ctx.fillText(n.subject.slice(0,34),n.x+9,n.y+4)}})}
+ (function loop(){step();draw();if(frames++<500&&$("#cv")===cv)requestAnimationFrame(loop)})();
+ const pick=e=>{const r=cv.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;let best=null,bd=144;N.forEach(n=>{const dd=(n.x-x)**2+(n.y-y)**2;if(dd<bd){bd=dd;best=n}});return best};
+ cv.onclick=e=>{const n=pick(e);if(!n)return;sel=n;draw();const nb=L.filter(l=>l.a===n||l.b===n).map(l=>[l.k,l.a===n?l.b:l.a]);
+  $("#nodeinfo").innerHTML=`<div class="chip">${n.kind}${n.status?" · "+n.status:""}</div> <a href="#memory/${n.id}">open</a>${n.input_id?` · <a href="#input/${n.input_id}">its input</a>`:""}<p>${esc(n.text)}</p><p class="muted">${esc(n.said_by)} · ${ago(n.said_at)}</p><h3>Linked (${nb.length})</h3>${nb.map(([k,m])=>`<div style="margin:4px 0"><span class="dot" style="background:${col(m)}"></span><span class="chip">${k}</span>${esc(m.text.slice(0,120))}</div>`).join("")}`};
+ cv.ondblclick=e=>{const n=pick(e);if(n)location.hash="graph/"+n.id};
+}
+
+/* ---------- recall: each candidate as a dot, thresholds as lines ---------- */
+async function recallView(){const rr=SYS.recent_recalls;return `<h3>Recent recalls <span class="muted" style="font-size:12px">pick one to see why each memory got in</span></h3>
+ <div>${rr.map(r=>`<a href="#injection/${r.id}" class="chip" style="text-decoration:none;color:var(--ink)">${ago(r.at)} · ${r.n} in · ${r.ms} ms · ${esc((r.cue||"").slice(0,50))}</a>`).join("")}</div>`}
+async function injectionView(id){const r=await get("/api/injection?id="+id);const tr=r.trace,T=r.texts;
+ const cands=[];(tr.cues||[]).forEach(c=>(c.considered||[]).forEach(x=>cands.push({...x,cue:c.label})));
+ const chained=new Set((tr.crossings||[]).map(x=>x.to)),injected=new Set(JSON.parse(r.node_ids||"[]"));
+ const xs=v=>40+(v-0.1)/0.7*880,ys=v=>300-(v+1)/5*280;
+ let svg=`<svg viewBox="0 0 960 330" width="100%"><line x1="${xs(.35)}" y1="10" x2="${xs(.35)}" y2="300" stroke="var(--line)" stroke-dasharray="4"/><line x1="${xs(.6)}" y1="10" x2="${xs(.6)}" y2="300" stroke="var(--state)" stroke-dasharray="4"/>
+ <line x1="40" y1="${ys(2.5)}" x2="920" y2="${ys(2.5)}" stroke="var(--perc)" stroke-dasharray="4"/><text x="924" y="${ys(2.5)+4}" class="sub">z 2.5</text><text x="${xs(.6)+4}" y="20" class="sub">0.60 always in</text><text x="${xs(.35)+4}" y="20" class="sub">0.35 floor</text>
+ <text x="480" y="326" class="sub" text-anchor="middle">similarity to the cue (cosine) →</text><text x="12" y="160" class="sub" transform="rotate(-90 12 160)" text-anchor="middle">stands out from the rest (z) →</text>`;
+ cands.forEach(x=>{if(x.cos==null)return;const m=String(x.decision).startsWith("match"),inj=injected.has(x.id);const c=inj?"--state":m?"--perc":"--held";
+  svg+=`<circle cx="${xs(x.cos)}" cy="${ys(x.z??(x.subject_cos?x.subject_cos*4:0))}" r="${inj?7:m?5:3.5}" fill="var(${c})" opacity="${m?1:.55}"><title>${(x.kind==="state"?"s":"p")+x.id} [${x.cue}] cos ${x.cos} z ${x.z}: ${esc(x.decision)}\n${esc(T[x.id]?.text||"")}</title></circle>`});
+ svg+=`</svg>`;
+ const inj=[...injected];return `<h3>Recall ${id}: ${ago(r.at)}, ${r.ms} ms${tr.timing_ms?` (recall ${tr.timing_ms.recall} ms)`:""}</h3><div class="muted" style="margin-bottom:8px">${esc((r.cue_text||"").slice(0,240))}</div>
+ <div class="legend"><span><span class="dot" style="background:var(--state)"></span>put into context</span><span><span class="dot" style="background:var(--perc)"></span>matched but dropped or cut</span><span><span class="dot" style="background:var(--held)"></span>not matched</span><span class="muted">hover a dot for its text</span></div>${svg}
+ <div class="grid2"><div><h3>What went in (${inj.length})</h3>${inj.map(n=>`<div style="margin:5px 0"><span class="dot" style="background:var(${chained.has(n)?"--sit":"--state"})"></span><a href="#memory/${n}">${n}</a> ${chained.has(n)?'<span class="chip">via a link</span>':""} ${esc(T[n]?.text||"")}</div>`).join("")||"nothing"}</div>
+ <div><h3>Dropped</h3>${(tr.dropped||[]).map(x=>`<div class="muted">${x.id}: ${esc(x.why)}</div>`).join("")||"none"}<h3>Full text injected</h3><pre>${esc(r.text||"(nothing)")}</pre></div></div>`}
+
+/* ---------- detail pages kept for drilling to the bottom ---------- */
+async function memoryView(id){const n=await get("/api/memory?id="+id);if(!n)return"not found";setTimeout(()=>drawGraph(id),0);
+ return `<div class="grid2"><div><h3>Neighbourhood</h3><canvas id="cv" height="560"></canvas></div><div class="side" id="nodeinfo"><div class="chip">${n.kind}${n.status?" · "+n.status:""}</div>${n.input_id?` <a href="#input/${n.input_id}">its input</a>`:""}
+ <p>${esc(n.text)}</p><p class="muted">${esc(n.said_by)} · ${ago(n.said_at)}</p>${n.versions.map(v=>`<div class="card"><b>v${v.n}</b> <span class="chip">${v.op}</span><span class="chip">${v.status}</span><div>${esc(v.text)}</div><div class="muted">why: ${esc(v.reason)}</div></div>`).join("")}
+ <h3>Put into context ${n.injected.length} times</h3>${n.injected.slice(0,10).map(j=>`<a class="chip" href="#injection/${j.id}">${ago(j.at)}</a>`).join("")}</div></div>`}
+async function inputView(id){const d=await get("/api/input?id="+id),i=d.info;if(!i)return"not found";
+ const tree=`<svg viewBox="0 0 960 ${Math.max(120,d.memories.length*34+20)}" width="100%"><g><rect x="10" y="${d.memories.length*17-10}" width="220" height="40" rx="8" fill="var(--raw)"/><text x="20" y="${d.memories.length*17+15}" fill="#fff" style="fill:#fff">i${id} · ${esc(i.type)}</text></g>
+ ${d.memories.map((n,k)=>`<path d="M230,${d.memories.length*17+10} C300,${d.memories.length*17+10} 300,${k*34+24} 360,${k*34+24}" stroke="var(--line)" fill="none"/><circle cx="366" cy="${k*34+24}" r="6" fill="var(${n.kind==="situation"?"--sit":"--perc"})"/><a href="#memory/${n.id}"><text x="378" y="${k*34+28}" font-size="12">${esc(n.text.slice(0,95))}${n.text.length>95?"…":""}</text></a>`).join("")}</svg>`;
+ return `<h3>Input i${id}: ${esc(i.type)} by ${esc(i.said_by)}, ${ago(i.happened_at)} <span class="chip">${i.perceive}</span></h3><div class="muted" style="font-size:12px">source ${esc(i.source_path)}</div>
+ <div class="card">${tree}</div><details><summary>Text the model saw</summary><pre>${esc(i.text)}</pre></details><details><summary>Raw bytes as stored</summary><pre>${esc(d.raw)}</pre></details>
+ ${d.model_calls.map(c=>`<a class="chip" href="#call/${c.id}">model call ${c.id} · ${c.step}</a>`).join("")}`}
+async function sessionView(id){const d=await get("/api/inputs?all=1&limit=400&session="+encodeURIComponent(id));const col={ryan_message:"--perc",claude_text:"--state",tool_call:"--raw",tool_result:"--raw",reasoning:"--sit"};
+ return `<h3>Session timeline <span class="muted" style="font-size:12px">each square is an input, newest first; filled = understood</span></h3><div>${d.map(r=>`<a href="#input/${r.input_id}" title="${esc(r.type)} · ${esc(r.said_by)} · ${r.perceive}\n${esc(r.preview)}" style="display:inline-block;width:14px;height:14px;margin:2px;border-radius:3px;border:2px solid var(${col[r.type]||"--held"});background:${r.perceive==="done"?`var(${col[r.type]||"--held"})`:"transparent"}"></a>`).join("")}</div>
+ <div class="legend" style="margin-top:8px"><span><span class="dot" style="background:var(--perc)"></span>you</span><span><span class="dot" style="background:var(--state)"></span>Claude</span><span><span class="dot" style="background:var(--raw)"></span>tools</span><span><span class="dot" style="background:var(--sit)"></span>thinking</span></div>`}
+async function callView(id){const c=await get("/api/call?id="+id);let o={};try{o=JSON.parse(c.response)}catch(e){}return `<h3>Model call ${id} · ${c.step} · ${c.model} · ${c.ms} ms</h3><details open><summary>Answer</summary><pre>${esc(JSON.stringify(o.structured_output??o,null,1))}</pre></details><details><summary>Prompt</summary><pre>${esc(c.prompt)}</pre></details><details><summary>System prompt</summary><pre>${esc(c.system)}</pre></details>`}
+
+function tickerHTML(s){const icon={perceive:"--perc",state:"--state",recall:"--state",sync:"--raw",budget:"--sit"};
+ return s.last.map(e=>`<div><span class="dot" style="background:var(${e.ok?(icon[e.kind]||"--held"):"--bad"})"></span><b>${e.kind}</b> <span class="muted">${ago(e.at)}</span> ${esc(e.summary)}</div>`).join("")}
+async function openPiece(id){focus=id;location.hash="piece/"+id}
+async function render(){const [view,arg]=(location.hash.slice(1)||"").split("/");SYS=await get("/api/system");header(SYS);
+ const top=`<div class="card">${mapSVG(SYS)}</div>`;let body="";
+ if(view==="piece"){focus=arg;body=await drill[arg]()}
+ else if(view==="graph"){focus="graph";body=await graphView(arg)}
+ else if(view==="injection"){focus="recall";body=await injectionView(arg)}
+ else if(view==="memory"){focus="graph";body=await memoryView(arg)}
+ else if(view==="input"){focus="store";body=await inputView(arg)}
+ else if(view==="session"){focus="sessions";body=await sessionView(decodeURIComponent(arg))}
+ else if(view==="call"){focus="perceive";body=await callView(arg)}
+ else {focus=null;body=`<p class="muted">Click any piece of the system to look inside it. Dots on the arrows are work flowing in the last 15 minutes.</p>`}
+ $("#main").innerHTML=`<div class="grid2"><div>${top}</div><div class="card" style="max-height:${document.body.clientWidth>900?400:260}px;overflow:auto"><h3>Live</h3><div class="ticker" id="ticker">${tickerHTML(SYS)}</div></div></div><div class="card">${body}</div>`;}
+async function refresh(){try{const s=await get("/api/system");SYS=s;header(s);const svgCard=document.querySelector(".card svg")?.parentElement;if(svgCard)svgCard.innerHTML=mapSVG(s);const t=$("#ticker");if(t)t.innerHTML=tickerHTML(s)}catch(e){}}
+window.onhashchange=render;render();setInterval(refresh,5000);
+</script>
+</body>
+</html>
